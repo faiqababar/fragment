@@ -1,21 +1,19 @@
-import React, { useState, useCallback, useEffect } from "react";
+import React, { useState, useCallback, useEffect, useMemo } from "react";
 import ReactFlow, {
   MiniMap,
   Controls,
   Background,
   useReactFlow,
   ReactFlowProvider,
+  applyNodeChanges,
 } from "reactflow";
 import "reactflow/dist/style.css";
-
-const avatarImages = {
-  frodo: "/avatars/char1.png",
-  gandalf: "/avatars/char1.png",
-  aragorn: "/avatars/char1.png",
-  you: "/avatars/char1.png",
-};
+import AvatarNode from "./components/AvatarNode";
+import AddCharacterModal from "./components/AddCharacterModal";
+import { useChat } from "./hooks/useChat";
 
 const gridSize = 50;
+const defaultAvatar = "/avatars/char1.png";
 
 const generateRandomRGBA = (alpha = 0.5) => {
   const red = Math.floor(Math.random() * 256);
@@ -43,45 +41,30 @@ const createCharacterNode = (
 });
 
 const initialNodes = [
-  createCharacterNode("you", "You", { x: 0, y: 0 }, avatarImages.you, {
+  createCharacterNode("you", "You", { x: 0, y: 0 }, defaultAvatar, {
     trait: "",
   }),
 ];
-
-const AvatarNode = ({ data }) => {
-  return (
-    <div className="text-center">
-      <img
-        src={data.avatar}
-        alt={data.label}
-        width={60}
-        height={60}
-        className="rounded-full border border-black"
-        style={{ background: data.backgroundColor }}
-      />
-      <div>{data.label}</div>
-    </div>
-  );
-};
 
 const nodeTypes = {
   avatarNode: AvatarNode,
 };
 
 function BoardInner() {
-  const { screenToFlowPosition } = useReactFlow();
+  const reactFlow = useReactFlow();
   const [nodes, setNodes] = useState(initialNodes);
   const [characters, setCharacters] = useState([
     {
       id: "you",
       name: "You",
       trait: "",
-      avatar: avatarImages.you,
+      avatar: defaultAvatar,
       position: { x: 0, y: 0 },
     },
   ]);
 
   const [isFormOpen, setIsFormOpen] = useState(false);
+  const [draggingNodeId, setDraggingNodeId] = useState(null);
   const [pendingPosition, setPendingPosition] = useState({ x: 0, y: 0 });
   const [formValues, setFormValues] = useState({
     name: "",
@@ -89,6 +72,8 @@ function BoardInner() {
     avatarFile: null,
     avatarUrl: "",
   });
+
+  // Chat handled via useChat
 
   // Handle arrow key movement
   const movePlayer = useCallback((dx, dy) => {
@@ -118,20 +103,13 @@ function BoardInner() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [movePlayer]);
 
-  const onNodeClick = (_, node) => {
-    if (node.id !== "you") {
-      alert(`Chat with ${node.data.label}`);
-    }
-  };
-
   const snapToGrid = (pos) => ({
     x: Math.round(pos.x / gridSize) * gridSize,
     y: Math.round(pos.y / gridSize) * gridSize,
   });
 
   const onPaneClick = (event) => {
-    // Only add when clicking on the canvas background
-    const flowPos = screenToFlowPosition({
+    const flowPos = reactFlow.screenToFlowPosition({
       x: event.clientX,
       y: event.clientY,
     });
@@ -140,6 +118,80 @@ function BoardInner() {
     setFormValues({ name: "", trait: "", avatarFile: null, avatarUrl: "" });
     setIsFormOpen(true);
   };
+
+  const onNodesChange = useCallback(
+    (changes) => {
+      const hasSelectChange = changes.some((ch) => ch.type === "select");
+      let lastSelectedId = null;
+      for (const ch of changes) {
+        if (ch.type === "select" && ch.selected) lastSelectedId = ch.id;
+      }
+
+      const filteredChanges = draggingNodeId
+        ? changes.filter(
+            (ch) => !(ch.type === "position" && ch.id !== draggingNodeId)
+          )
+        : changes;
+
+      setNodes((currentNodes) => {
+        const updated = applyNodeChanges(filteredChanges, currentNodes);
+        if (hasSelectChange) {
+          if (lastSelectedId) {
+            return updated.map((n) => ({
+              ...n,
+              selected: n.id === lastSelectedId,
+            }));
+          }
+          return updated.map((n) => ({ ...n, selected: false }));
+        }
+        return updated;
+      });
+    },
+    [draggingNodeId]
+  );
+
+  const onNodeDragStart = useCallback(
+    (_, node) => {
+      setDraggingNodeId(node.id);
+      // Ensure only the dragged node is selected so it doesn't drag other previously-selected nodes
+      setNodes((prev) =>
+        prev.map((n) => ({
+          ...n,
+          selected: n.id === node.id,
+          draggable: n.id === node.id,
+        }))
+      );
+      // Also clear selection in React Flow's internal state immediately
+      try {
+        reactFlow.setNodes((nds) =>
+          nds.map((n) => ({ ...n, selected: n.id === node.id }))
+        );
+      } catch {}
+    },
+    [reactFlow]
+  );
+
+  const onNodeDragStop = useCallback(
+    (_, node) => {
+      setDraggingNodeId(null);
+      setNodes((prev) =>
+        prev.map((n) => {
+          const base = { ...n, selected: false };
+          const cleared = { ...base, draggable: true };
+          return n.id === node.id
+            ? { ...cleared, position: snapToGrid(node.position) }
+            : cleared;
+        })
+      );
+      // Clear any lingering selection inside React Flow instance
+      try {
+        reactFlow.setNodes((nds) =>
+          nds.map((n) => ({ ...n, selected: false }))
+        );
+      } catch {}
+    },
+    [reactFlow]
+  );
 
   const handleFormChange = (e) => {
     const { name, value, files } = e.target;
@@ -164,7 +216,7 @@ function BoardInner() {
     e.preventDefault();
     const name = (formValues.name || "Unnamed").trim();
     const trait = (formValues.trait || "").trim();
-    const avatarSrc = formValues.avatarUrl || avatarImages.you;
+    const avatarSrc = formValues.avatarUrl || defaultAvatar;
     const id = generateId(name);
 
     const newCharacter = {
@@ -188,14 +240,35 @@ function BoardInner() {
     setIsFormOpen(false);
   };
 
+  const getNodeById = useCallback(
+    (nodeId) => nodes.find((n) => n.id === nodeId) || null,
+    [nodes]
+  );
+
+  const youNode = useMemo(() => getNodeById("you"), [getNodeById]);
+
+  const { onNodeClick, renderedNodes } = useChat({
+    nodes,
+    youNode,
+    getNodeById,
+  });
+
   return (
     <div className="h-screen">
       <ReactFlow
-        nodes={nodes}
+        nodes={renderedNodes}
         edges={[]}
         onNodeClick={onNodeClick}
         nodeTypes={nodeTypes}
         onPaneClick={onPaneClick}
+        onNodesChange={onNodesChange}
+        onNodeDragStart={onNodeDragStart}
+        onNodeDragStop={onNodeDragStop}
+        multiSelectionKeyCode={null}
+        selectNodesOnDrag={false}
+        elementsSelectable={false}
+        snapToGrid
+        snapGrid={[gridSize, gridSize]}
         panOnScroll
         fitView
       >
@@ -209,80 +282,15 @@ function BoardInner() {
         Characters: {characters.length}
       </div>
 
-      {isFormOpen && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-5 w-[360px] shadow-2xl text-left">
-            <h3 className="mb-4 text-lg font-semibold">Add Character</h3>
-            <form onSubmit={handleFormSubmit}>
-              <div className="mb-3">
-                <label className="block font-semibold mb-1 text-left">
-                  Name
-                </label>
-                <input
-                  type="text"
-                  name="name"
-                  value={formValues.name}
-                  onChange={handleFormChange}
-                  placeholder="e.g., Frodo"
-                  className="w-full px-3 py-2 rounded border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  autoFocus
-                />
-              </div>
-              <div className="mb-3">
-                <label className="block font-semibold mb-1 text-left">
-                  Personality / Trait
-                </label>
-                <input
-                  type="text"
-                  name="trait"
-                  value={formValues.trait}
-                  onChange={handleFormChange}
-                  placeholder="e.g., Brave, wise"
-                  className="w-full px-3 py-2 rounded border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-              </div>
-              <div className="mb-4">
-                <label className="block font-semibold mb-1 text-left">
-                  Avatar
-                </label>
-                <input
-                  type="file"
-                  name="avatar"
-                  accept="image/*"
-                  onChange={handleFormChange}
-                  className="block"
-                />
-                {formValues.avatarUrl && (
-                  <div className="mt-2">
-                    <img
-                      src={formValues.avatarUrl}
-                      alt="preview"
-                      width={60}
-                      height={60}
-                      className="rounded-full"
-                    />
-                  </div>
-                )}
-              </div>
-              <div className="flex gap-2 justify-end">
-                <button
-                  type="button"
-                  onClick={handleFormCancel}
-                  className="px-3 py-2 rounded border border-gray-300 hover:bg-gray-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-3 py-2 rounded bg-blue-600 text-white hover:bg-blue-700"
-                >
-                  Save
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      <AddCharacterModal
+        open={isFormOpen}
+        values={formValues}
+        onChange={handleFormChange}
+        onSubmit={handleFormSubmit}
+        onCancel={handleFormCancel}
+      />
+
+      {/* Removed bottom chat panel in favor of thought bubble on the character */}
     </div>
   );
 }
