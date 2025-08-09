@@ -10,6 +10,8 @@ export default function AvatarNode({ data }) {
           value={data.chatInput || ""}
           onChange={data.onChatInputChange}
           onSend={data.onSend}
+          profiles={data.chatProfiles}
+          isTyping={data.isTyping}
         />
       )}
       <img

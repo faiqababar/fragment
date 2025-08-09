@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { generateCharacterReply } from "../services/gemini";
 
 /**
  * Encapsulates chat state, proximity selection, message handling, and
@@ -8,6 +9,7 @@ export function useChat({ nodes, youNode, getNodeById, proximityPx = 80 }) {
   const [activeChatPartnerId, setActiveChatPartnerId] = useState(null);
   const [conversations, setConversations] = useState({});
   const [chatInput, setChatInput] = useState("");
+  const [typingPartnerId, setTypingPartnerId] = useState(null);
 
   const partnerNode = useMemo(() => {
     if (!activeChatPartnerId) return null;
@@ -17,7 +19,9 @@ export function useChat({ nodes, youNode, getNodeById, proximityPx = 80 }) {
   const partnerTrait = partnerNode?.data?.trait || "";
 
   const ensureConversation = useCallback((partnerId) => {
-    setConversations((prev) => (prev[partnerId] ? prev : { ...prev, [partnerId]: [] }));
+    setConversations((prev) =>
+      prev[partnerId] ? prev : { ...prev, [partnerId]: [] }
+    );
   }, []);
 
   useEffect(() => {
@@ -43,7 +47,9 @@ export function useChat({ nodes, youNode, getNodeById, proximityPx = 80 }) {
     }
 
     let nextId = null;
-    const currentNode = activeChatPartnerId ? nodes.find((n) => n.id === activeChatPartnerId) : null;
+    const currentNode = activeChatPartnerId
+      ? nodes.find((n) => n.id === activeChatPartnerId)
+      : null;
     if (
       currentNode &&
       Math.hypot(
@@ -95,31 +101,89 @@ export function useChat({ nodes, youNode, getNodeById, proximityPx = 80 }) {
     (e) => {
       e?.preventDefault?.();
       if (!activeChatPartnerId) return;
+      // Stabilize partner id in this send cycle in case selection changes mid-reply
+      const partnerId = activeChatPartnerId;
       const trimmed = chatInput.trim();
       if (!trimmed) return;
       const now = Date.now();
       setConversations((prev) => {
-        const existing = prev[activeChatPartnerId] || [];
+        const existing = prev[partnerId] || [];
         return {
           ...prev,
-          [activeChatPartnerId]: [...existing, { sender: "you", text: trimmed, t: now }],
+          [partnerId]: [...existing, { sender: "you", text: trimmed, t: now }],
         };
       });
       setChatInput("");
 
-      const replyDelayMs = 600 + Math.floor(Math.random() * 800);
-      const replyText = randomReply(partnerTrait, trimmed);
-      setTimeout(() => {
-        setConversations((prev) => {
-          const existing = prev[activeChatPartnerId] || [];
-          return {
-            ...prev,
-            [activeChatPartnerId]: [...existing, { sender: "them", text: replyText, t: Date.now() }],
-          };
-        });
-      }, replyDelayMs);
+      // Try Gemini; if no key or error, fall back to local random reply
+      const doReply = async () => {
+        const apiKey = process.env.REACT_APP_GEMINI_API_KEY;
+        // show transient typing indicator for this partner
+        setTypingPartnerId(partnerId);
+        const convo = (prevId) => {
+          // Build short history for this partner including the just-sent user message
+          const existing = conversations[prevId] || [];
+          return existing;
+        };
+
+        try {
+          let replyText = "";
+          if (apiKey) {
+            try {
+              const partner = getNodeById(partnerId);
+              const name = partner?.data?.label || "Character";
+              const msgs = [
+                ...convo(partnerId),
+                { sender: "you", text: trimmed },
+              ];
+              replyText = await generateCharacterReply({
+                messages: msgs,
+                persona: partnerTrait,
+                characterName: name,
+              });
+            } catch (err) {
+              replyText = randomReply(partnerTrait, trimmed);
+            }
+          } else {
+            replyText = randomReply(partnerTrait, trimmed);
+          }
+
+          // Add a human-like typing delay based on reply length
+          const minMs = 600; // minimum perceived latency
+          const perCharMs = 25; // typing speed-ish
+          const maxMs = 3000; // cap to keep UX snappy
+          const computed = Math.min(
+            maxMs,
+            Math.max(minMs, perCharMs * replyText.length)
+          );
+          await new Promise((r) => setTimeout(r, computed));
+
+          setConversations((prev) => {
+            const existing = prev[partnerId] || [];
+            return {
+              ...prev,
+              [partnerId]: [
+                ...existing,
+                { sender: "them", text: replyText, t: Date.now() },
+              ],
+            };
+          });
+        } finally {
+          // Clear typing indicator only if it matches this cycle's partner
+          setTypingPartnerId((curr) => (curr === partnerId ? null : curr));
+        }
+      };
+
+      doReply();
     },
-    [activeChatPartnerId, chatInput, partnerTrait, randomReply]
+    [
+      activeChatPartnerId,
+      chatInput,
+      partnerTrait,
+      randomReply,
+      conversations,
+      getNodeById,
+    ]
   );
 
   const onNodeClick = useCallback(
@@ -135,24 +199,51 @@ export function useChat({ nodes, youNode, getNodeById, proximityPx = 80 }) {
   );
 
   const renderedNodes = useMemo(() => {
-    if (!partnerNode) return nodes;
-    const messages = conversations[activeChatPartnerId] || [];
-    return nodes.map((n) =>
-      n.id === partnerNode.id
-        ? {
-            ...n,
-            data: {
-              ...n.data,
-              showChatBubble: true,
-              messages,
-              chatInput,
-              onChatInputChange: setChatInput,
-              onSend: handleSendMessage,
-            },
-          }
-        : n
-    );
-  }, [nodes, partnerNode, conversations, activeChatPartnerId, chatInput, handleSendMessage]);
+    const messages = partnerNode
+      ? conversations[activeChatPartnerId] || []
+      : [];
+
+    return nodes.map((node) => {
+      const isActivePartner = !!partnerNode && node.id === partnerNode.id;
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          showChatBubble: isActivePartner,
+          ...(isActivePartner
+            ? {
+                messages,
+                chatInput,
+                onChatInputChange: setChatInput,
+                onSend: handleSendMessage,
+                chatProfiles: {
+                  you: {
+                    name: youNode?.data?.label || "You",
+                    avatar: youNode?.data?.avatar || null,
+                    backgroundColor: youNode?.data?.backgroundColor,
+                  },
+                  them: {
+                    name: partnerNode?.data?.label || "Character",
+                    avatar: partnerNode?.data?.avatar || null,
+                    backgroundColor: partnerNode?.data?.backgroundColor,
+                  },
+                },
+                isTyping: typingPartnerId === partnerNode.id,
+              }
+            : {}),
+        },
+      };
+    });
+  }, [
+    nodes,
+    partnerNode,
+    conversations,
+    activeChatPartnerId,
+    chatInput,
+    handleSendMessage,
+    youNode,
+    typingPartnerId,
+  ]);
 
   return {
     onNodeClick,
@@ -160,4 +251,3 @@ export function useChat({ nodes, youNode, getNodeById, proximityPx = 80 }) {
     activeChatPartnerId,
   };
 }
-
