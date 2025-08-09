@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { generateCharacterReply } from "../services/gemini";
+import { useLocalStorage } from "./useLocalStorage";
 
 /**
  * Encapsulates chat state, proximity selection, message handling, and
@@ -7,10 +8,26 @@ import { generateCharacterReply } from "../services/gemini";
  */
 export function useChat({ nodes, youNode, getNodeById, proximityPx = 80 }) {
   const [activeChatPartnerId, setActiveChatPartnerId] = useState(null);
-  const [conversations, setConversations] = useState({});
+  const [conversations, setConversations] = useLocalStorage(
+    "fragment_conversations",
+    {}
+  );
   const [chatInput, setChatInput] = useState("");
   const [typingPartnerId, setTypingPartnerId] = useState(null);
-  const [conversationContexts, setConversationContexts] = useState({});
+  const [conversationContexts, setConversationContexts] = useLocalStorage(
+    "fragment_conversation_contexts",
+    {}
+  );
+
+  // Use ref to track current conversations state
+  const conversationsRef = useRef(conversations);
+  conversationsRef.current = conversations;
+
+  // Debug: log when conversations change
+  useEffect(() => {
+    console.log("Conversations state changed:", conversations);
+    console.log("Ref updated to:", conversationsRef.current);
+  }, [conversations]);
 
   const partnerNode = useMemo(() => {
     if (!activeChatPartnerId) return null;
@@ -144,13 +161,28 @@ export function useChat({ nodes, youNode, getNodeById, proximityPx = 80 }) {
       const trimmed = chatInput.trim();
       if (!trimmed) return;
       const now = Date.now();
+
+      // Create the user message
+      const userMessage = { sender: "you", text: trimmed, t: now };
+
+      // Get current conversation and add user message
+      const currentConversation = conversations[partnerId] || [];
+      const conversationWithUser = [...currentConversation, userMessage];
+
+      console.log("Current conversation:", currentConversation);
+      console.log("User message to add:", userMessage);
+      console.log("Conversation with user:", conversationWithUser);
+
+      // Update conversations state
       setConversations((prev) => {
-        const existing = prev[partnerId] || [];
-        return {
+        const updated = {
           ...prev,
-          [partnerId]: [...existing, { sender: "you", text: trimmed, t: now }],
+          [partnerId]: conversationWithUser,
         };
+        console.log("Updated conversations state:", updated);
+        return updated;
       });
+
       setChatInput("");
 
       // Try Gemini; if no key or error, fall back to local random reply
@@ -158,11 +190,9 @@ export function useChat({ nodes, youNode, getNodeById, proximityPx = 80 }) {
         const apiKey = process.env.REACT_APP_GEMINI_API_KEY;
         // show transient typing indicator for this partner
         setTypingPartnerId(partnerId);
-        const convo = (prevId) => {
-          // Build short history for this partner including the just-sent user message
-          const existing = conversations[prevId] || [];
-          return existing;
-        };
+
+        // Use the conversation that includes the user's message
+        const msgs = conversationWithUser;
 
         try {
           let replyText = "";
@@ -177,10 +207,7 @@ export function useChat({ nodes, youNode, getNodeById, proximityPx = 80 }) {
                 ? `\n\nCONVERSATION CONTEXT: ${context}`
                 : "";
 
-              const msgs = [
-                ...convo(partnerId),
-                { sender: "you", text: trimmed },
-              ];
+              // msgs is already defined above
               replyText = await generateCharacterReply({
                 messages: msgs,
                 persona: partnerTrait + contextPrompt,
@@ -216,18 +243,43 @@ export function useChat({ nodes, youNode, getNodeById, proximityPx = 80 }) {
           await new Promise((r) => setTimeout(r, computed));
 
           setConversations((prev) => {
+            // Use the conversation that includes the user's message, not the potentially stale state
             const existing = prev[partnerId] || [];
-            return {
-              ...prev,
-              [partnerId]: [
+            console.log("Existing conversation when adding reply:", existing);
+
+            // Ensure the user message is still there
+            const hasUserMessage = existing.some(
+              (msg) =>
+                msg.sender === "you" && msg.text === trimmed && msg.t === now
+            );
+
+            let finalConversation;
+            if (!hasUserMessage) {
+              // If user message is missing, add it back
+              finalConversation = [
                 ...existing,
-                {
-                  sender: "them",
-                  text: replyText,
-                  t: Date.now(),
-                },
-              ],
+                userMessage,
+                { sender: "them", text: replyText, t: Date.now() },
+              ];
+              console.log("User message was missing, added it back");
+            } else {
+              // User message is there, just add the reply
+              finalConversation = [
+                ...existing,
+                { sender: "them", text: replyText, t: Date.now() },
+              ];
+            }
+
+            const updated = {
+              ...prev,
+              [partnerId]: finalConversation,
             };
+            console.log("Adding character reply:", {
+              sender: "them",
+              text: replyText,
+            });
+            console.log("Final conversations after reply:", updated);
+            return updated;
           });
         } finally {
           // Clear typing indicator only if it matches this cycle's partner
@@ -240,11 +292,13 @@ export function useChat({ nodes, youNode, getNodeById, proximityPx = 80 }) {
     [
       activeChatPartnerId,
       chatInput,
-      partnerTrait,
-      randomReply,
+      setConversations,
       conversations,
       getNodeById,
       conversationContexts,
+      partnerTrait,
+      setConversationContexts,
+      randomReply,
     ]
   );
 
@@ -259,6 +313,11 @@ export function useChat({ nodes, youNode, getNodeById, proximityPx = 80 }) {
     },
     [youNode, proximityPx]
   );
+
+  // Create a stable onSend function
+  const onSend = useCallback(() => {
+    handleSendMessage();
+  }, [handleSendMessage]);
 
   const renderedNodes = useMemo(() => {
     const messages = partnerNode
@@ -277,7 +336,7 @@ export function useChat({ nodes, youNode, getNodeById, proximityPx = 80 }) {
                 messages,
                 chatInput,
                 onChatInputChange: setChatInput,
-                onSend: handleSendMessage,
+                onSend: onSend,
                 chatProfiles: {
                   you: {
                     name: youNode?.data?.label || "You",
@@ -302,7 +361,7 @@ export function useChat({ nodes, youNode, getNodeById, proximityPx = 80 }) {
     conversations,
     activeChatPartnerId,
     chatInput,
-    handleSendMessage,
+    onSend,
     youNode,
     typingPartnerId,
   ]);

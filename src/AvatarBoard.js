@@ -11,6 +11,11 @@ import "reactflow/dist/style.css";
 import AvatarNode from "./components/AvatarNode";
 import AddCharacterModal from "./components/AddCharacterModal";
 import { useChat } from "./hooks/useChat";
+import {
+  useLocalStorage,
+  useClearStorage,
+  useNodesWithStorage,
+} from "./hooks/useLocalStorage";
 
 const gridSize = 50;
 const defaultAvatar = "/avatars/char1.png";
@@ -52,8 +57,10 @@ const nodeTypes = {
 
 function BoardInner() {
   const reactFlow = useReactFlow();
-  const [nodes, setNodes] = useState(initialNodes);
-  const [characters, setCharacters] = useState([
+
+  const [nodes, setNodes] = useNodesWithStorage("fragment_nodes", initialNodes);
+
+  const [characters, setCharacters] = useLocalStorage("fragment_characters", [
     {
       id: "you",
       name: "You",
@@ -62,6 +69,69 @@ function BoardInner() {
       position: { x: 0, y: 0 },
     },
   ]);
+  const clearStorage = useClearStorage();
+
+  // Ensure "you" character always exists
+  useEffect(() => {
+    const hasYou = characters.some((char) => char.id === "you");
+    if (!hasYou) {
+      setCharacters((prev) => [
+        {
+          id: "you",
+          name: "You",
+          trait: "",
+          avatar: defaultAvatar,
+          position: { x: 0, y: 0 },
+        },
+        ...prev,
+      ]);
+    }
+  }, [characters, setCharacters]);
+
+  // Ensure "you" node always exists
+  useEffect(() => {
+    const hasYouNode = nodes.some((node) => node.id === "you");
+    if (!hasYouNode) {
+      setNodes((prev) => [
+        createCharacterNode("you", "You", { x: 0, y: 0 }, defaultAvatar, {
+          trait: "",
+        }),
+        ...prev,
+      ]);
+    }
+  }, [nodes, setNodes]);
+
+  // Sync characters with nodes to ensure consistency
+  useEffect(() => {
+    const nodeIds = nodes.map((node) => node.id);
+    const characterIds = characters.map((char) => char.id);
+
+    // Add missing characters from nodes
+    const missingCharacters = nodes
+      .filter((node) => node.id !== "you" && !characterIds.includes(node.id))
+      .map((node) => ({
+        id: node.id,
+        name: node.data.label,
+        trait: node.data.trait || "",
+        avatar: node.data.avatar,
+        position: node.position,
+      }));
+
+    if (missingCharacters.length > 0) {
+      setCharacters((prev) => [...prev, ...missingCharacters]);
+    }
+
+    // Remove characters that don't have corresponding nodes
+    const orphanedCharacters = characters.filter(
+      (char) => char.id !== "you" && !nodeIds.includes(char.id)
+    );
+
+    if (orphanedCharacters.length > 0) {
+      setCharacters((prev) =>
+        prev.filter((char) => char.id === "you" || nodeIds.includes(char.id))
+      );
+    }
+  }, [nodes, characters, setCharacters]);
 
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [draggingNodeId, setDraggingNodeId] = useState(null);
@@ -76,21 +146,25 @@ function BoardInner() {
   // Chat handled via useChat
 
   // Handle arrow key movement
-  const movePlayer = useCallback((dx, dy) => {
-    setNodes((prev) =>
-      prev.map((node) =>
-        node.id === "you"
-          ? {
-              ...node,
-              position: {
-                x: node.position.x + dx * gridSize,
-                y: node.position.y + dy * gridSize,
-              },
-            }
-          : node
-      )
-    );
-  }, []);
+  const movePlayer = useCallback(
+    (dx, dy) => {
+      setNodes((prev) => {
+        const updated = prev.map((node) =>
+          node.id === "you"
+            ? {
+                ...node,
+                position: {
+                  x: node.position.x + dx * gridSize,
+                  y: node.position.y + dy * gridSize,
+                },
+              }
+            : node
+        );
+        return updated;
+      });
+    },
+    [gridSize]
+  );
 
   useEffect(() => {
     const handleKeyDown = (e) => {
@@ -226,13 +300,17 @@ function BoardInner() {
       avatar: avatarSrc,
       position: pendingPosition,
     };
-    setCharacters((prev) => [...prev, newCharacter]);
 
     const newNode = createCharacterNode(id, name, pendingPosition, avatarSrc, {
       trait,
     });
+
+    // Update both states in a single batch to ensure consistency
+    setCharacters((prev) => [...prev, newCharacter]);
     setNodes((prev) => [...prev, newNode]);
 
+    // Reset form
+    setFormValues({ name: "", trait: "", avatarFile: null, avatarUrl: "" });
     setIsFormOpen(false);
   };
 
@@ -271,15 +349,51 @@ function BoardInner() {
         snapGrid={[gridSize, gridSize]}
         panOnScroll
         fitView
+        deleteKeyCode={null}
+        preventScrolling={false}
       >
         <MiniMap />
         <Controls />
         <Background />
       </ReactFlow>
 
-      {/* Lightweight overlay to reflect saved characters (satisfies linter and UX) */}
+      {/* Status overlay showing saved characters and storage info */}
       <div className="absolute top-2 left-2 bg-white/90 border border-gray-300 rounded-md px-2 py-1 text-xs">
-        Characters: {characters.length}
+        <div>Characters: {characters.length}</div>
+        <div className="text-green-600">💾 Auto-saved</div>
+        <div className="text-gray-500 text-xs">
+          {(() => {
+            try {
+              const totalSize = Object.keys(localStorage)
+                .filter((key) => key.startsWith("fragment_"))
+                .reduce(
+                  (size, key) => size + (localStorage[key]?.length || 0),
+                  0
+                );
+              return `${Math.round(totalSize / 1024)}KB used`;
+            } catch {
+              return "";
+            }
+          })()}
+        </div>
+      </div>
+
+      {/* Clear storage button */}
+      <div className="absolute top-2 right-2">
+        <button
+          onClick={() => {
+            if (
+              window.confirm("Clear all saved data? This cannot be undone.")
+            ) {
+              clearStorage();
+              window.location.reload();
+            }
+          }}
+          className="bg-red-500 hover:bg-red-600 text-white text-xs px-2 py-1 rounded-md transition-colors"
+          title="Clear all saved data"
+        >
+          Clear Data
+        </button>
       </div>
 
       <AddCharacterModal

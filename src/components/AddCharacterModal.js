@@ -28,7 +28,7 @@ export default function AddCharacterModal({
           </div>
           <div className="mb-3">
             <label className="block font-semibold mb-1 text-left">
-              Personality / Trait
+              Personality
             </label>
             <input
               type="text"

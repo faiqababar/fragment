@@ -1,6 +1,31 @@
-# Getting Started with Create React App
+# Fragment - Interactive Character Chat
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+A React-based interactive character chat application where you can create characters, position them on a grid, and have conversations with them. Characters respond based on their personality traits and conversation history.
+
+## Features
+
+- **Character Creation**: Add characters with custom names, traits, and avatars
+- **Grid-based Movement**: Move your character around using arrow keys
+- **Proximity-based Chat**: Chat with characters when you're close to them
+- **AI-powered Responses**: Characters respond using Gemini AI or fallback personality-based responses
+- **Persistent Storage**: All characters, positions, and conversations are automatically saved to browser storage
+- **Cross-tab Sync**: Changes sync across multiple browser tabs/windows
+
+## Data Persistence
+
+The application automatically saves all data to your browser's localStorage:
+
+- **Characters**: Names, traits, avatars, and positions
+- **Conversations**: Complete chat history with each character
+- **Conversation Contexts**: AI conversation memory for more coherent responses
+
+Data persists until you:
+
+- Clear your browser data/cache
+- Use the "Clear Data" button in the top-right corner
+- Manually clear localStorage
+
+Storage usage is displayed in the top-left status overlay.
 
 ## Available Scripts
 
