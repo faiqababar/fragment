@@ -6,12 +6,19 @@ export default function AvatarNode({ data }) {
     <div className="relative text-center select-none">
       {data.showChatBubble && (
         <ChatBubble
+          key={`${data.isAutonomousChat ? "autonomous" : "regular"}-${
+            data.id || "unknown"
+          }`}
           messages={data.messages || []}
           value={data.chatInput || ""}
           onChange={data.onChatInputChange}
           onSend={data.onSend}
           profiles={data.chatProfiles}
           isTyping={data.isTyping}
+          currentTopic={data.currentTopic || null}
+          currentMessageCount={data.currentMessageCount || 0}
+          maxMessages={data.maxMessages || 10}
+          onRestartChat={data.onRestartChat || null}
         />
       )}
       <img

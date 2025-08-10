@@ -6,7 +6,7 @@ import { useLocalStorage } from "./useLocalStorage";
  * Encapsulates chat state, proximity selection, message handling, and
  * injection of chat bubble props into the active partner node.
  */
-export function useChat({ nodes, youNode, getNodeById, proximityPx = 80 }) {
+export function useChat({ nodes, youNode, getNodeById, proximityPx = 120 }) {
   const [activeChatPartnerId, setActiveChatPartnerId] = useState(null);
   const [conversations, setConversations] = useLocalStorage(
     "fragment_conversations",
@@ -29,6 +29,84 @@ export function useChat({ nodes, youNode, getNodeById, proximityPx = 80 }) {
     console.log("Ref updated to:", conversationsRef.current);
   }, [conversations]);
 
+  // Initialize conversations from localStorage on mount
+  useEffect(() => {
+    console.log("Initializing conversations from localStorage");
+    try {
+      const stored = localStorage.getItem("fragment_conversations");
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        console.log("Found stored conversations:", parsed);
+
+        // Only update if we have conversations that aren't in our current state
+        const hasNewConversations = Object.keys(parsed).some(
+          (key) =>
+            !conversations[key] ||
+            conversations[key].length !== parsed[key].length
+        );
+
+        if (hasNewConversations) {
+          console.log("Updating conversations state with stored data");
+          setConversations((prev) => ({
+            ...prev,
+            ...parsed,
+          }));
+        }
+      }
+    } catch (error) {
+      console.error(
+        "Error initializing conversations from localStorage:",
+        error
+      );
+    }
+  }, []); // Only run on mount
+
+  // Debug: log when activeChatPartnerId changes
+  useEffect(() => {
+    console.log("Active chat partner changed to:", activeChatPartnerId);
+    if (activeChatPartnerId) {
+      const currentConversation = conversations[activeChatPartnerId] || [];
+      console.log(
+        `Conversation for ${activeChatPartnerId}:`,
+        currentConversation
+      );
+
+      // Ensure the conversation exists in localStorage
+      if (!currentConversation.length) {
+        console.log(
+          `No conversation found for ${activeChatPartnerId}, checking localStorage directly`
+        );
+        try {
+          const stored = localStorage.getItem("fragment_conversations");
+          if (stored) {
+            const parsed = JSON.parse(stored);
+            const storedConversation = parsed[activeChatPartnerId] || [];
+            console.log(
+              `Found conversation in localStorage for ${activeChatPartnerId}:`,
+              storedConversation
+            );
+
+            // If we found a conversation in localStorage but not in state, sync it
+            if (storedConversation.length > 0) {
+              console.log(
+                `Syncing conversation from localStorage for ${activeChatPartnerId}`
+              );
+              setConversations((prev) => ({
+                ...prev,
+                [activeChatPartnerId]: storedConversation,
+              }));
+            }
+          }
+        } catch (error) {
+          console.error(
+            "Error reading conversations from localStorage:",
+            error
+          );
+        }
+      }
+    }
+  }, [activeChatPartnerId, conversations, setConversations]);
+
   const partnerNode = useMemo(() => {
     if (!activeChatPartnerId) return null;
     return getNodeById(activeChatPartnerId);
@@ -36,19 +114,83 @@ export function useChat({ nodes, youNode, getNodeById, proximityPx = 80 }) {
 
   const partnerTrait = partnerNode?.data?.trait || "";
 
-  const ensureConversation = useCallback((partnerId) => {
-    setConversations((prev) =>
-      prev[partnerId] ? prev : { ...prev, [partnerId]: [] }
-    );
-  }, []);
+  const ensureConversation = useCallback(
+    (partnerId) => {
+      setConversations((prev) => {
+        if (prev[partnerId]) {
+          console.log(
+            `Conversation already exists for ${partnerId}:`,
+            prev[partnerId]
+          );
+          return prev;
+        }
+        console.log(`Creating new conversation for ${partnerId}`);
+        return { ...prev, [partnerId]: [] };
+      });
+    },
+    [setConversations]
+  );
+
+  // Function to backup current conversation before switching partners
+  const backupCurrentConversation = useCallback(() => {
+    if (activeChatPartnerId && conversations[activeChatPartnerId]) {
+      console.log(
+        `Backing up conversation for ${activeChatPartnerId}:`,
+        conversations[activeChatPartnerId]
+      );
+      // The conversation is already saved in localStorage via useLocalStorage
+      // This is just for debugging
+    }
+  }, [activeChatPartnerId, conversations]);
+
+  // Function to restore conversation for a partner
+  const restoreConversation = useCallback(
+    (partnerId) => {
+      console.log(`Attempting to restore conversation for ${partnerId}`);
+      try {
+        const stored = localStorage.getItem("fragment_conversations");
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          const storedConversation = parsed[partnerId] || [];
+          console.log(
+            `Found stored conversation for ${partnerId}:`,
+            storedConversation
+          );
+
+          if (storedConversation.length > 0) {
+            setConversations((prev) => {
+              const updated = {
+                ...prev,
+                [partnerId]: storedConversation,
+              };
+              console.log(`Restored conversation for ${partnerId}:`, updated);
+              return updated;
+            });
+          }
+        }
+      } catch (error) {
+        console.error(`Error restoring conversation for ${partnerId}:`, error);
+      }
+    },
+    [setConversations]
+  );
 
   useEffect(() => {
-    if (activeChatPartnerId) ensureConversation(activeChatPartnerId);
+    if (activeChatPartnerId) {
+      console.log(`Ensuring conversation exists for ${activeChatPartnerId}`);
+      ensureConversation(activeChatPartnerId);
+    }
   }, [activeChatPartnerId, ensureConversation]);
 
   // Choose nearest node within proximity to chat with; keeps partner sticky if still in range
   useEffect(() => {
-    if (!youNode) return;
+    if (!youNode) {
+      console.log("No youNode found for chat proximity detection");
+      return;
+    }
+
+    console.log("Checking chat proximity for You at:", youNode.position);
+
     let nearest = null;
     let nearestDist = Number.POSITIVE_INFINITY;
     const withinThreshold = [];
@@ -57,12 +199,18 @@ export function useChat({ nodes, youNode, getNodeById, proximityPx = 80 }) {
       const dx = node.position.x - youNode.position.x;
       const dy = node.position.y - youNode.position.y;
       const dist = Math.hypot(dx, dy);
+      console.log(`Distance to ${node.data.label}: ${dist}px`);
       if (dist < nearestDist) {
         nearestDist = dist;
         nearest = node;
       }
       if (dist <= proximityPx) withinThreshold.push({ node, dist });
     }
+
+    console.log(
+      "Characters within chat proximity:",
+      withinThreshold.map((t) => t.node.data.label)
+    );
 
     let nextId = null;
     const currentNode = activeChatPartnerId
@@ -76,52 +224,103 @@ export function useChat({ nodes, youNode, getNodeById, proximityPx = 80 }) {
       ) <= proximityPx
     ) {
       nextId = activeChatPartnerId;
+      console.log("Keeping current chat partner:", currentNode.data.label);
     } else if (withinThreshold.length > 0 && nearest) {
       nextId = nearest.id;
+      console.log("Setting new chat partner:", nearest.data.label);
+      // Ensure conversation exists for the new partner
+      ensureConversation(nearest.id);
     } else {
       nextId = null;
+      console.log("No chat partner in proximity");
     }
 
-    if (nextId !== activeChatPartnerId) setActiveChatPartnerId(nextId);
-  }, [nodes, youNode, proximityPx, activeChatPartnerId]);
+    console.log("🔍 Chat proximity decision:", {
+      currentNode: currentNode?.data?.label,
+      currentDistance: currentNode
+        ? Math.hypot(
+            currentNode.position.x - youNode.position.x,
+            currentNode.position.y - youNode.position.y
+          )
+        : null,
+      proximityThreshold: proximityPx,
+      withinThreshold: withinThreshold.map((t) => t.node.data.label),
+      nearest: nearest?.data?.label,
+      nextId,
+      activeChatPartnerId,
+    });
+
+    if (nextId !== activeChatPartnerId) {
+      console.log(
+        `Chat partner changed from ${activeChatPartnerId} to ${nextId}`
+      );
+
+      // Backup current conversation before switching
+      if (activeChatPartnerId) {
+        backupCurrentConversation();
+      }
+
+      if (nextId) {
+        const nextNode = nodes.find((n) => n.id === nextId);
+        console.log(
+          `🎯 New chat partner: ${nextNode?.data?.label} (${nextId})`
+        );
+
+        // Restore conversation for the new partner
+        restoreConversation(nextId);
+      } else {
+        console.log(`🎯 No chat partner selected`);
+      }
+
+      setActiveChatPartnerId(nextId);
+    }
+  }, [
+    nodes,
+    youNode,
+    proximityPx,
+    activeChatPartnerId,
+    ensureConversation,
+    backupCurrentConversation,
+    restoreConversation,
+  ]);
 
   const randomReply = useCallback((traitText, userMessage) => {
     const personalityResponses = {
       philosophical: [
-        "Hmm… that’s deeper than it sounds. What sparked that thought? 🤔",
+        "Hmm… that's deeper than it sounds. What sparked that thought? 🤔",
         "Interesting… makes me wonder where it all leads. What about you?",
-        "That’s got some weight to it… have you always seen it that way?",
-        "Feels like there’s a story behind that. Wanna share?",
+        "That's got some weight to it… have you always seen it that way?",
+        "Feels like there's a story behind that. Wanna share?",
       ],
       cheerful: [
         "Love that energy! 🌟 What else has you smiling today?",
-        "That’s awesome! 😊 Got more good vibes to share?",
-        "Haha, you’re a ray of sunshine! ☀️ How do you do it?",
-        "That’s the spirit! 💪 What’s next on your happy list?",
+        "That's awesome! 😊 Got more good vibes to share?",
+        "Haha, you're a ray of sunshine! ☀️ How do you do it?",
+        "That's the spirit! 💪 What's next on your happy list?",
       ],
       mysterious: [
-        "Ooh… there’s more you’re not telling me, isn’t there? 👀",
-        "Feels like you’re hiding something juicy. Care to spill?",
-        "That’s got a strange ring to it… almost like a riddle. 🔮",
-        "You’re up to something. I can feel it. 😏",
+        "Ooh… there's more you're not telling me, isn't there? 👀",
+        "Feels like you're hiding something juicy. Care to spill?",
+        "That's got a strange ring to it… almost like a riddle. 🔮",
+        "You're up to something. I can feel it. 😏",
       ],
       wise: [
-        "Solid insight. 🧠 How’d you figure that out?",
-        "You’ve been around the block, huh? What else have you learned?",
-        "That’s sharp. 🎯 Any advice for the rest of us?",
+        "Solid insight. 🧠 How'd you figure that out?",
+        "You've been around the block, huh? What else have you learned?",
+        "That's sharp. 🎯 Any advice for the rest of us?",
         "Smart take… mind if I borrow it?",
       ],
       curious: [
-        "That’s interesting! How’d you find out about it?",
-        "Whoa, tell me more — I’m hooked. 👀",
-        "Love that! What’s the story behind it?",
+        "That's interesting! How'd you find out about it?",
+        "Whoa, tell me more — I'm hooked. 👀",
+        "Love that! What's the story behind it?",
         "Okay, now I need all the details. Spill! 🍵",
       ],
       sassy: [
         "Oh really? 💅 Convince me.",
-        "Well, look who’s clever. What else you got?",
+        "Well, look who's clever. What else you got?",
         "Ha! Not bad. Got more like that?",
-        "Please… you think that’s wild? Try me. 😏",
+        "Please… you think that's wild? Try me. 😏",
       ],
       neutral: [
         "I see… tell me more.",
@@ -320,9 +519,17 @@ export function useChat({ nodes, youNode, getNodeById, proximityPx = 80 }) {
   }, [handleSendMessage]);
 
   const renderedNodes = useMemo(() => {
-    const messages = partnerNode
-      ? conversations[activeChatPartnerId] || []
-      : [];
+    // Get messages for the active chat partner, ensuring we have the latest state
+    const messages =
+      partnerNode && activeChatPartnerId
+        ? conversations[activeChatPartnerId] || []
+        : [];
+
+    console.log(
+      `Rendering nodes with activeChatPartnerId: ${activeChatPartnerId}`
+    );
+    console.log(`Messages for ${activeChatPartnerId}:`, messages);
+    console.log(`All conversations:`, conversations);
 
     return nodes.map((node) => {
       const isActivePartner = !!partnerNode && node.id === partnerNode.id;
@@ -370,5 +577,7 @@ export function useChat({ nodes, youNode, getNodeById, proximityPx = 80 }) {
     onNodeClick,
     renderedNodes,
     activeChatPartnerId,
+    conversations,
+    setActiveChatPartnerId,
   };
 }
